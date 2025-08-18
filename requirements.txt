@@ -11,9 +11,6 @@ langchain-community
 langchain-google-genai
 ollama
 
-# Vector Store (Facebook AI Similarity Search)
-faiss-cpu
-
 # Web Search
 duckduckgo-search
 requests

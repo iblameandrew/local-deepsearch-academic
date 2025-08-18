@@ -26,7 +26,7 @@ from langgraph.graph import StateGraph, START, END
 
 # Default academic domains to search
 DEFAULT_DOMAINS = ["ieeexplore.ieee.org", "dl.acm.org", "arxiv.org", "scholar.google.com"]
-GEMINI_MODELS = ["gemini-1.5-pro-latest", "gemini-1.5-flash-latest", "gemini-pro"]
+GEMINI_MODELS = ["gemini-2.5-pro-latest", "gemini-2.5-flash-latest"]
 
 # --- RAPTOR IMPLEMENTATION ---
 

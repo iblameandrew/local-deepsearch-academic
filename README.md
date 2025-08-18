@@ -65,7 +65,7 @@ The app will automatically load this. If you don't create this file, the app wil
 If you're using a local model, you need to have Ollama installed and running.
 
 1.  [Install Ollama](https://ollama.ai/).
-2.  Pull a model to chat with. Llama 3 is a great choice.
+2.  Pull a model to chat with. 
 
     ```bash
         ollama run dengcao/Qwen3-30B-A3B-Instruct-2507
