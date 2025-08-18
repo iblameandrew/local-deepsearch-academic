@@ -1,6 +1,6 @@
 # ![deep-research](https://github.com/user-attachments/assets/b98d01cb-0d7d-4cd9-a117-8af29d0b47e8)
 
-Academic Deep Search & QA 📚🧠
+## Academic Deep Search & QA 📚🧠
 
 I built this tool because I wanted a way to quickly dive into a new research topic, pull down the relevant papers, and start asking questions right away—without spending days on manual searching and reading.
 
