@@ -563,38 +563,34 @@ def render_mermaid_to_image(mermaid_code: str) -> Optional[bytes]:
         st.error(f"Failed to render Mermaid diagram: {e}")
         return None
 
-
 def generate_pdf_report(
-    chat_history: List[Dict[str, str]],
+    chat_history: List[Dict[str, str]], 
     used_sources: List[str],
     mermaid_image_bytes: Optional[bytes] = None
 ) -> bytes:
     pdf = FPDF()
-    
     pdf.add_font('DejaVu', '', 'fonts/DejaVuSans.ttf', uni=True)
     pdf.add_font('DejaVu', 'B', 'fonts/DejaVuSans-Bold.ttf', uni=True)
-
     pdf.add_page()
-    pdf.set_font("DejaVu", 'B', size=16) # <-- CHANGED from "Arial"
+    pdf.set_font("DejaVu", 'B', size=16)
     pdf.cell(0, 10, txt="Q&A Chat History", ln=True, align='C')
     pdf.ln(10)
 
     for message in chat_history:
         role, content = message.get('role', ''), message.get('content', '')
         if role == 'user':
-            pdf.set_font('DejaVu', 'B', 12) # <-- CHANGED from "Arial"
+            pdf.set_font('DejaVu', 'B', 12)
             pdf.set_text_color(0, 0, 128)
             pdf.multi_cell(0, 10, f"Question: {content}")
         else:
-            pdf.set_font('DejaVu', '', 12) # <-- CHANGED from "Arial"
+            pdf.set_font('DejaVu', '', 12)
             pdf.set_text_color(0, 0, 0)
-            # The 'latin-1' encoding is no longer needed with a proper Unicode font
             pdf.multi_cell(0, 10, f"Answer: {content}")
         pdf.ln(5)
 
     if mermaid_image_bytes:
         pdf.add_page()
-        pdf.set_font("DejaVu", 'B', size=16) # <-- CHANGED from "Arial"
+        pdf.set_font("DejaVu", 'B', size=16)
         pdf.cell(0, 10, txt="Pipeline Execution Diagram", ln=True, align='C')
         pdf.ln(5)
         try:
@@ -605,46 +601,48 @@ def generate_pdf_report(
             pdf.image(tmpfile_path, x=10, y=30, w=190)
             os.remove(tmpfile_path)
         except Exception as e:
-            pdf.set_font("DejaVu", size=12) # <-- CHANGED from "Arial"
+            pdf.set_font("DejaVu", size=12)
             pdf.set_text_color(255, 0, 0)
             pdf.multi_cell(0, 10, f"Error rendering diagram: {e}")
 
     if used_sources:
         pdf.add_page()
-        pdf.set_font("DejaVu", 'B', size=16) # <-- CHANGED from "Arial"
+        pdf.set_font("DejaVu", 'B', size=16)
         pdf.cell(0, 10, txt="References", ln=True, align='L')
         pdf.ln(5)
-        pdf.set_font("DejaVu", size=10) # <-- CHANGED from "Arial"
+        pdf.set_font("DejaVu", size=10)
         for i, source in enumerate(sorted(list(used_sources))):
-            pdf.multi_cell(0, 8, f"{i+1}. {source}")
+           
+            pdf.write(h=8, text=f"{i+1}. {source}")
+       
+            pdf.ln(8) 
             
-    # Use 'latin-1' for the final output encoding as it's byte-oriented
-    return pdf.output(dest='S').encode('latin-1')
+
+    return bytes(pdf.output(dest='S'))
 
 def generate_bibliography_pdf(papers_by_publisher: Dict[str, List[str]]) -> bytes:
     pdf = FPDF()
-
-
     pdf.add_font('DejaVu', '', 'fonts/DejaVuSans.ttf', uni=True)
     pdf.add_font('DejaVu', 'B', 'fonts/DejaVuSans-Bold.ttf', uni=True)
-  
-    
     pdf.add_page()
-    pdf.set_font("DejaVu", 'B', size=16) # <-- CHANGED from "Arial"
+    pdf.set_font("DejaVu", 'B', size=16)
     pdf.cell(0, 10, txt="Full Bibliography of Indexed Articles", ln=True, align='C')
     pdf.ln(10)
     
     for publisher, urls in papers_by_publisher.items():
         if urls:
-            pdf.set_font("DejaVu", 'B', size=14) # <-- CHANGED from "Arial"
+            pdf.set_font("DejaVu", 'B', size=14)
             pdf.cell(0, 10, txt=f"--- {publisher} ---", ln=True, align='L')
             pdf.ln(5)
-            pdf.set_font("DejaVu", size=10) # <-- CHANGED from "Arial"
+            pdf.set_font("DejaVu", size=10)
             for i, url in enumerate(urls):
-                pdf.multi_cell(0, 8, f"{i+1}. {url}")
+           
+                pdf.write(h=8, text=f"{i+1}. {url}")
+                pdf.ln(8)
+  
             pdf.ln(5)
             
-    return pdf.output(dest='S').encode('latin-1')
+    return bytes(pdf.output(dest='S'))
 
 def generate_mermaid_diagram(final_state: ResearchState) -> str:
     total_found = len(final_state.get('all_arxiv_results', []))
