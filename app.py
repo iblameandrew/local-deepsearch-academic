@@ -1,5 +1,3 @@
-# academic_deep_search.py
-
 import streamlit as st
 import os
 import numpy as np
@@ -13,6 +11,8 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 import arxiv
+from collections import Counter, defaultdict
+import re
 
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage
@@ -31,10 +31,9 @@ load_dotenv()
 
 # --- CONFIGURATION ---
 
-# Corrected Scopus to Elsevier, as it's the publisher.
-DEFAULT_PUBLISHERS = ["IEEE", "ACM", "Springer", "Elsevier"]
+DEFAULT_PUBLISHERS = ["IEEE", "ACM", "Springer", "Elsevier", "IEEE Explorer", "IEEE Transactions"]
 
-# --- RAPTOR IMPLEMENTATION ---
+# --- RAPTOR IMPLEMENTATION (No changes here) ---
 
 class RAPTORRetriever(BaseRetriever):
     raptor_index: Any
@@ -132,27 +131,18 @@ class RAPTOR:
             clusters[label].append(i)
         return clusters
 
-    # --- START OF FIX 1 ---
     def _summarize_cluster(self, cluster_docs: List[Document]) -> Tuple[str, dict]:
         context = "\n\n---\n\n".join([doc.page_content for doc in cluster_docs])
-        
-        # Create a proper prompt template with a placeholder
         prompt = ChatPromptTemplate.from_messages([
             SystemMessage(content="You are an AI assistant that summarizes academic texts. Create a concise, abstractive summary of the following content, synthesizing the key information."),
             HumanMessage(content="Please summarize the following content:\n\n{context}")
         ])
-        
-        # Create a chain by piping the prompt and the model
         chain = prompt | self.llm
-        
-        # Invoke the chain with the context variable
         response = chain.invoke({"context": context})
-        
         summary = response.content
         aggregated_sources = list(set(doc.metadata.get("url", "Unknown Source") for doc in cluster_docs))
         combined_metadata = {"sources": aggregated_sources}
         return summary, combined_metadata
-    # --- END OF FIX 1 ---
     
     def retrieve(self, query: str, k: int = 5) -> List[Document]:
         return self.vector_store.similarity_search(query, k=k) if self.vector_store else []
@@ -160,150 +150,198 @@ class RAPTOR:
     def as_retriever(self) -> BaseRetriever:
         return RAPTORRetriever(raptor_index=self)
 
-# --- STATE DEFINITION FOR LANGGRAPH (No changes here) ---
+# --- STATE DEFINITION FOR LANGGRAPH ---
 class ResearchState(TypedDict):
     query: str
     publishers: List[str]
     num_references: int
-    start_year: int
-    end_year: int
-    papers_by_publisher: Dict[str, List[str]]
+
+    # Final papers for bibliography
+    final_kept_papers: Dict[str, List[str]]
     path_to_metadata_map: Dict[str, Dict[str, str]]
-    extracted_docs: list
+    
+    # Intermediate state for pipeline
+    all_arxiv_results: List[Dict[str, Any]]
+    papers_to_download: List[Dict[str, Any]]
+    extracted_docs: List[Document]
+    relevant_docs: List[Document]
+    
+    # Logging and RAPTOR index
+    discard_log: List[Dict[str, str]]
     raptor_index: Any
     conversation_history: Annotated[List[BaseMessage], operator.add]
-    generation: str
 
 # --- LANGGRAPH NODES AND GRAPH DEFINITION ---
 def start_search_node(state: ResearchState) -> ResearchState:
     st.write("Starting research process...")
-    return {"papers_by_publisher": {}, "path_to_metadata_map": {}, "extracted_docs": []}
+    return {"discard_log": [], "final_kept_papers": {}}
 
-def arxiv_search_and_filter_node(state: ResearchState) -> ResearchState:
-    st.write("Stage 1: Searching arXiv and filtering by publisher...")
+def arxiv_search_node(state: ResearchState) -> ResearchState:
+    st.write("Stage 1: Searching arXiv for candidate papers...")
+    query_terms = state["query"]
+    st.write(f"Query terms: {query_terms}")
     
-    # --- START OF FIX 2 ---
-    # Corrected filter logic for Elsevier (owner of Scopus)
+    client = arxiv.Client()
+    
+    search = arxiv.Search(
+        query = query_terms,
+        max_results = 2000,
+        sort_by = arxiv.SortCriterion.SubmittedDate
+    )
+
+    results =client.results(
+        search = search
+    )
+
+    results = len(results)
+
+    
+    all_results = []
+    search_progress = st.progress(0, text="Fetching results from arXiv...")
+    
+    try:
+        total_results = len(results)
+
+        for i, result in enumerate(results):
+            search_progress.progress((i + 1) / total_results, text=f"Fetching result {i+1}/{total_results}")
+            if result.pdf_url:
+                all_results.append({
+                    "url": result.pdf_url,
+                    "title": result.title,
+                    "result_obj": result
+                })
+    except arxiv.UnexpectedEmptyPageError:
+        st.info("Processed all available results from arXiv for this query.")
+    except Exception as e:
+        st.error(f"An error occurred during arXiv search: {e}")
+
+    st.success(f"Found {len(all_results)} candidate papers on arXiv.")
+    return {"all_arxiv_results": all_results}
+
+def filter_by_publisher_node(state: ResearchState) -> ResearchState:
+    st.write("Stage 2: Filtering by Publisher...")
+    
     filter_criteria = {
         "IEEE": lambda r: (r.journal_ref and "IEEE" in r.journal_ref) or (r.doi and "10.1109" in r.doi),
-        "IEEE Explorer": lambda r: (r.journal_ref and "IEEE Explorer" in r.journal_ref)   ,      
-        "IEEE Transactions": lambda r: (r.journal_ref and "IEEE Transactions" in r.journal_ref)   ,      
+        "IEEE Explorer": lambda r: (r.journal_ref and "IEEE Explorer" in r.journal_ref),      
+        "IEEE Transactions": lambda r: (r.journal_ref and "IEEE Transactions" in r.journal_ref),      
         "ACM": lambda r: (r.journal_ref and "ACM" in r.journal_ref) or (r.doi and "10.1145" in r.doi),
         "Springer": lambda r: (r.journal_ref and "Springer" in r.journal_ref) or (r.doi and "10.1007" in r.doi),
         "Elsevier": lambda r: (r.journal_ref and "Elsevier" in r.journal_ref) or (r.doi and "10.1016" in r.doi)
     }
-    # --- END OF FIX 2 ---
+
+    papers_to_download = []
+    discard_log = state.get("discard_log", [])
     
-    selected_publishers = state["publishers"]
-    if not selected_publishers:
-        st.warning("No publishers selected. Please select at least one.")
-        return {"papers_by_publisher": {}}
-    
-    query_terms = state["query"]
-    start_dt = datetime(state['start_year'], 1, 1)
-    end_dt = datetime(state['end_year'], 12, 31)
-    
-    st.write(f"Searching for: '{query_terms}'...")
-    search = arxiv.Search(
-        query=query_terms,
-        max_results=state["num_references"] * 15,
-        sort_by=arxiv.SortCriterion.SubmittedDate
-    )
-    
-    found_papers = {pub: [] for pub in selected_publishers}
-    total_found = 0
-    total_needed = state["num_references"]
-    
-    results_iterator = search.results()
-    search_progress = st.progress(0, text="Filtering arXiv results...")
-    
-    st.write("Iterating through results to find matches...")
-    
-    try:
-        for i, result in enumerate(results_iterator):
-            if total_found >= total_needed:
-                st.write(f"Reached the desired number of {total_needed} references.")
+    for paper in state["all_arxiv_results"]:
+        result = paper["result_obj"]
+        matched_publisher = "Unknown"
+        is_kept = False
+        
+        for pub, checker in filter_criteria.items():
+            if checker(result):
+                matched_publisher = pub
                 break
-
-            if i % 20 == 0:
-                progress_val = total_found / total_needed if total_needed > 0 else 0
-                search_progress.progress(progress_val, text=f"Scanned {i+1} papers | Found {total_found}/{total_needed} matches")
-
-            if not (start_dt.date() <= result.published.date() <= end_dt.date()):
-                continue
-                
-            for pub in selected_publishers:
-                if filter_criteria.get(pub)(result):
-                    if result.pdf_url and result.pdf_url not in [url for urllist in found_papers.values() for url in urllist]:
-                        found_papers[pub].append(result.pdf_url)
-                        total_found += 1
-                        break
-    except arxiv.UnexpectedEmptyPageError:
-        st.info("Processed all available results from arXiv for this query.")
-
-    search_progress.progress(1.0, text="Filtering complete.")
+        
+        if matched_publisher in state["publishers"]:
+            paper_meta = paper.copy()
+            paper_meta["publisher"] = matched_publisher
+            papers_to_download.append(paper_meta)
+            is_kept = True
+        
+        if not is_kept:
+            discard_log.append({
+                "url": paper["url"],
+                "title": paper["title"],
+                "reason": "Publisher not in selected list",
+                "publisher": matched_publisher
+            })
+            
+    discarded_count = len(state["all_arxiv_results"]) - len(papers_to_download)
+    st.info(f"Discarded {discarded_count} papers due to publisher mismatch.")
+    st.success(f"{len(papers_to_download)} papers passed the publisher filter.")
     
-    st.write("--- Search Results by Publisher ---")
-    for pub, papers in found_papers.items():
-        st.write(f"- {pub}: Found {len(papers)} papers.")
-        
-    if total_found == 0:
-        st.warning("Could not find any papers on arXiv matching your criteria. Try broadening your search.")
-        
-    return {"papers_by_publisher": found_papers}
+    return {"papers_to_download": papers_to_download, "discard_log": discard_log}
 
 def download_pdfs_node(state: ResearchState) -> ResearchState:
-    st.write("Stage 2: Downloading valid PDFs...")
+    st.write("Stage 3: Downloading and validating PDFs...")
     path_to_metadata_map = {}
+    discard_log = state.get("discard_log", [])
+    
     if not os.path.exists("temp_pdfs"):
         os.makedirs("temp_pdfs")
     
-    papers_by_publisher = state["papers_by_publisher"]
-    all_urls = [(url, pub) for pub, urls in papers_by_publisher.items() for url in urls]
+    papers_to_download = state["papers_to_download"]
+    total_urls = len(papers_to_download)
     
-    total_urls = len(all_urls)
     if total_urls == 0:
-        st.warning("No PDF URLs found to download.")
-        return {"path_to_metadata_map": {}}
+        st.warning("No papers to download after filtering.")
+        return {"path_to_metadata_map": {}, "discard_log": discard_log}
         
     download_progress = st.progress(0, text="Starting download...")
-
-    for i, (url, publisher) in enumerate(all_urls):
+    
+    for i, paper in enumerate(papers_to_download):
+        url = paper["url"]
         download_progress.progress((i + 1) / total_urls, text=f"Downloading paper {i+1}/{total_urls}...")
         try:
             response = requests.get(url, timeout=20, headers={'User-Agent': 'Mozilla/5.0'}, stream=True)
             response.raise_for_status()
             content_type = response.headers.get('Content-Type', '')
+            
             if 'application/pdf' in content_type.lower():
                 filename = f"temp_pdfs/{uuid.uuid4()}.pdf"
                 with open(filename, "wb") as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         f.write(chunk)
-                path_to_metadata_map[filename] = {"url": url, "publisher": publisher}
+                path_to_metadata_map[filename] = {
+                    "url": url, 
+                    "publisher": paper["publisher"], 
+                    "title": paper["title"]
+                }
             else:
-                st.warning(f"Skipped non-PDF file at {url} (Content-Type: {content_type})")
+                discard_log.append({
+                    "url": url, "title": paper["title"], "reason": "File is not a PDF", "publisher": paper["publisher"]
+                })
         except requests.exceptions.RequestException as e:
-            st.warning(f"Failed to download {url}: {e}")
+            discard_log.append({
+                "url": url, "title": paper["title"], "reason": f"Download failed: {e}", "publisher": paper["publisher"]
+            })
             
-    return {"path_to_metadata_map": path_to_metadata_map}
+    discarded_count = total_urls - len(path_to_metadata_map)
+    st.info(f"Discarded {discarded_count} papers due to download or format issues.")
+    st.success(f"Successfully downloaded {len(path_to_metadata_map)} papers.")
+            
+    return {"path_to_metadata_map": path_to_metadata_map, "discard_log": discard_log}
 
 def extract_text_node(state: ResearchState) -> ResearchState:
-    st.write("Stage 3: Extracting text from PDFs...")
+    st.write("Stage 4: Extracting text from PDFs...")
     all_docs = []
+    discard_log = state.get("discard_log", [])
     path_to_metadata_map = state["path_to_metadata_map"]
+    
+    successful_urls = set()
+
     for path, metadata in path_to_metadata_map.items():
         try:
             loader = PyPDFLoader(path)
             pages = loader.load_and_split()
             for page in pages:
-                page.metadata["url"] = metadata["url"]
-                page.metadata["publisher"] = metadata["publisher"]
+                page.metadata.update(metadata)
             all_docs.extend(pages)
+            successful_urls.add(metadata["url"])
         except Exception as e:
-            st.warning(f"Could not read or parse PDF from {metadata['url']}. It may be corrupted. Error: {e}")
+            discard_log.append({
+                "url": metadata["url"],
+                "title": metadata["title"],
+                "reason": "Corrupted or unreadable PDF",
+                "publisher": metadata["publisher"]
+            })
+    
+    discarded_count = len(path_to_metadata_map) - len(successful_urls)
+    st.info(f"Discarded {discarded_count} papers that were corrupted or unreadable.")
+    st.success(f"Successfully extracted text from {len(successful_urls)} papers.")
             
-    st.write(f"Successfully extracted {len(all_docs)} document chunks.")
-    return {"extracted_docs": all_docs}
+    return {"extracted_docs": all_docs, "discard_log": discard_log}
 
 def get_llm_and_embeddings(model_name: str, embeddings_model_name: Optional[str] = None):
     llm = ChatOllama(model=model_name, temperature=0.3)
@@ -311,54 +349,120 @@ def get_llm_and_embeddings(model_name: str, embeddings_model_name: Optional[str]
     embeddings = OllamaEmbeddings(model=embed_model)
     return llm, embeddings
 
+def filter_by_relevance_node(state: ResearchState) -> ResearchState:
+    st.write("Stage 5: Filtering by content relevance using LLM...")
+    if not state["extracted_docs"]:
+        st.warning("No documents to check for relevance.")
+        return {"relevant_docs": [], "discard_log": state["discard_log"]}
+
+    model_config = st.session_state.get("model_config", {})
+    llm, _ = get_llm_and_embeddings(model_name=model_config.get("model_name"))
+    
+    prompt_template = ChatPromptTemplate.from_messages([
+        ("system", "Analyze the abstract or the first page of the provided academic paper. Based SOLELY on this text, determine if the paper's primary focus is relevant to the query: '{query}'. Respond with only 'Yes' or 'No'."),
+        ("human", "Paper content:\n\n{content}")
+    ])
+    chain = prompt_template | llm
+
+    docs_by_url = defaultdict(list)
+    for doc in state["extracted_docs"]:
+        docs_by_url[doc.metadata["url"]].append(doc)
+        
+    relevant_docs = []
+    discard_log = state.get("discard_log", [])
+    total_papers = len(docs_by_url)
+    relevance_progress = st.progress(0, text="Checking relevance...")
+
+    for i, (url, docs) in enumerate(docs_by_url.items()):
+        relevance_progress.progress((i + 1) / total_papers, f"Checking paper {i+1}/{total_papers} for relevance...")
+        
+        # Use first ~500 words for efficiency
+        first_page_content = docs[0].page_content[:2500] 
+        
+        try:
+            response = chain.invoke({"query": state["query"], "content": first_page_content})
+            answer = response.content.strip().lower()
+            
+            if "yes" in answer:
+                relevant_docs.extend(docs)
+            else:
+                metadata = docs[0].metadata
+                discard_log.append({
+                    "url": url,
+                    "title": metadata.get("title", "N/A"),
+                    "reason": "Not relevant to query",
+                    "publisher": metadata.get("publisher", "N/A")
+                })
+        except Exception as e:
+            st.warning(f"LLM relevance check failed for {url}: {e}")
+            metadata = docs[0].metadata
+            discard_log.append({
+                "url": url,
+                "title": metadata.get("title", "N/A"),
+                "reason": "LLM relevance check failed",
+                "publisher": metadata.get("publisher", "N/A")
+            })
+
+    discarded_count = total_papers - len(set(doc.metadata["url"] for doc in relevant_docs))
+    st.info(f"Discarded {discarded_count} papers based on LLM relevance check.")
+    st.success(f"{total_papers - discarded_count} papers deemed relevant and kept for indexing.")
+    
+    return {"relevant_docs": relevant_docs, "discard_log": discard_log}
+
 def build_raptor_index_node(state: ResearchState) -> ResearchState:
-    st.write("Stage 4: Building RAPTOR index... This may take some time.")
+    st.write("Stage 6: Building RAPTOR index... This may take some time.")
+    
+    relevant_docs = state["relevant_docs"]
+    if not relevant_docs:
+        st.error("No relevant documents found to build the index.")
+        return {"raptor_index": None, "final_kept_papers": {}}
+
     model_config = st.session_state.get("model_config", {})
     chat_model_name = model_config.get("model_name")
     summary_model_name = model_config.get("summary_model_name")
     embeddings_model_name = model_config.get("embeddings_model_name")
     
-    if not chat_model_name:
-        st.error("Ollama chat model not configured correctly.")
-        return {"raptor_index": None}
-
-    summarizer_model_name = summary_model_name if summary_model_name else chat_model_name
-    llm_for_summaries = ChatOllama(model=summarizer_model_name, temperature=0.3)
+    summarizer_llm = ChatOllama(model=summary_model_name if summary_model_name else chat_model_name, temperature=0.3)
+    embeddings = OllamaEmbeddings(model=embeddings_model_name if embeddings_model_name else chat_model_name)
     
-    embed_model_name = embeddings_model_name if embeddings_model_name else chat_model_name
-    embeddings = OllamaEmbeddings(model=embed_model_name)
-    
-    if not state["extracted_docs"]:
-        st.error("No valid documents were extracted. Cannot build index.")
-        return {"raptor_index": None}
-
     raptor_index = RAPTOR(
-        llm=llm_for_summaries, 
+        llm=summarizer_llm, 
         embeddings_model=embeddings, 
         session_id=st.session_state.session_id
     )
-    raptor_index.add_documents(state["extracted_docs"])
+    raptor_index.add_documents(relevant_docs)
     
-    st.success("Research and indexing complete! You can now ask questions.")
-    return {"raptor_index": raptor_index}
+    # Populate final kept papers for bibliography
+    final_kept_papers = defaultdict(list)
+    kept_urls = set(doc.metadata["url"] for doc in relevant_docs)
+    for url in kept_urls:
+        publisher = next((doc.metadata["publisher"] for doc in relevant_docs if doc.metadata["url"] == url), "Unknown")
+        final_kept_papers[publisher].append(url)
 
-# --- GRAPH DEFINITION (No changes here) ---
+    st.success("Research and indexing complete! You can now ask questions.")
+    return {"raptor_index": raptor_index, "final_kept_papers": dict(final_kept_papers)}
+
+# --- GRAPH DEFINITION ---
 builder = StateGraph(ResearchState)
 builder.add_node("start_search", start_search_node)
-builder.add_node("arxiv_search_and_filter", arxiv_search_and_filter_node)
+builder.add_node("arxiv_search", arxiv_search_node)
+builder.add_node("filter_by_publisher", filter_by_publisher_node)
 builder.add_node("download_pdfs", download_pdfs_node)
 builder.add_node("extract_text", extract_text_node)
+builder.add_node("filter_by_relevance", filter_by_relevance_node)
 builder.add_node("build_raptor_index", build_raptor_index_node)
 
 builder.add_edge(START, "start_search")
-builder.add_edge("start_search", "arxiv_search_and_filter")
-builder.add_edge("arxiv_search_and_filter", "download_pdfs")
+builder.add_edge("start_search", "arxiv_search")
+builder.add_edge("arxiv_search", "filter_by_publisher")
+builder.add_edge("filter_by_publisher", "download_pdfs")
 builder.add_edge("download_pdfs", "extract_text")
-builder.add_edge("extract_text", "build_raptor_index")
+builder.add_edge("extract_text", "filter_by_relevance")
+builder.add_edge("filter_by_relevance", "build_raptor_index")
 builder.add_edge("build_raptor_index", END)
 graph = builder.compile()
 
-# --- HELPER FUNCTIONS & UI (No changes here) ---
+# --- HELPER FUNCTIONS & UI ---
 def generate_pdf_report(chat_history: List[Dict[str, str]], used_sources: List[str]) -> bytes:
     pdf = FPDF()
     pdf.add_page()
@@ -379,7 +483,7 @@ def generate_pdf_report(chat_history: List[Dict[str, str]], used_sources: List[s
         pdf.ln(5)
     if used_sources:
         pdf.add_page()
-        pdf.set_font("Arial", 'B', 16)
+        pdf.set_font("Arial", 'B', size=16)
         pdf.cell(0, 10, txt="References", ln=True, align='L')
         pdf.ln(5)
         pdf.set_font("Arial", size=10)
@@ -391,7 +495,7 @@ def generate_bibliography_pdf(papers_by_publisher: Dict[str, List[str]]) -> byte
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', size=16)
-    pdf.cell(0, 10, txt="Full Bibliography of Scraped Articles", ln=True, align='C')
+    pdf.cell(0, 10, txt="Full Bibliography of Indexed Articles", ln=True, align='C')
     pdf.ln(10)
     
     for publisher, urls in papers_by_publisher.items():
@@ -406,33 +510,47 @@ def generate_bibliography_pdf(papers_by_publisher: Dict[str, List[str]]) -> byte
             
     return pdf.output(dest='S').encode('latin-1')
 
-def generate_mermaid_diagram(query: str, publishers: List[str], num_refs: int, papers_by_publisher: Dict[str, List[str]], start_year: int, end_year: int) -> str:
-    diagram = f"""graph TD;
-    A[Start: User Input] --> B(LangGraph Pipeline);
-    B --> C[Search arXiv & Filter];
-    """
+def generate_mermaid_diagram(final_state: ResearchState) -> str:
+    total_found = len(final_state.get('all_arxiv_results', []))
+    discard_log = final_state.get('discard_log', [])
     
-    result_nodes = []
-    for pub in publishers:
-        count = len(papers_by_publisher.get(pub, []))
-        if count > 0:
-            node_id = f"R_{pub.replace(' ', '')}"
-            result_nodes.append(node_id)
-            diagram += f'    C --> {node_id}["Found {count} {pub} Papers"];\n'
-    
-    if result_nodes:
-         diagram += f"    {{{', '.join(result_nodes)}}} --> D[Download & Validate PDFs];\n"
-    else:
-        diagram += "    C --> D[Download & Validate PDFs];\n"
+    discard_counts = Counter(item['reason'] for item in discard_log)
+    publisher_discards = discard_counts.get("Publisher not in selected list", 0)
+    download_discards = sum(count for reason, count in discard_counts.items() if "Download failed" in reason or "not a PDF" in reason)
+    corrupt_discards = discard_counts.get("Corrupted or unreadable PDF", 0)
+    relevance_discards = discard_counts.get("Not relevant to query", 0) + discard_counts.get("LLM relevance check failed", 0)
 
-    diagram += f"""    D --> E[Extract Text];
-    E --> F[Build RAPTOR Index];
-    F --> G[Conversational QA];
+    after_search = total_found
+    after_publisher = after_search - publisher_discards
+    after_download = after_publisher - download_discards
+    after_extract = after_download - corrupt_discards
+    after_relevance = after_extract - relevance_discards
+    
+    def sanitize(text):
+        return re.sub(r'[^a-zA-Z0-9_]', '', text.replace(" ", ""))
+
+    diagram = f"""graph TD;
+    A[Start: User Input] --> B(arXiv Search);
+    B --> C{{Found {after_search} papers}};
+    C --> D[Filter by Publisher];
+    D -- Pass: {after_publisher} --> E[Download & Validate PDFs];
+    D -- Discard: {publisher_discards} --> F_{sanitize('Publisher not in selected list')}[Discarded by Publisher];
+    
+    E -- Pass: {after_download} --> G[Extract Text];
+    E -- Discard: {download_discards} --> F_{sanitize('Download failed')}[Discarded by Download/Format Error];
+    
+    G -- Pass: {after_extract} --> H[Filter by Relevance];
+    G -- Discard: {corrupt_discards} --> F_{sanitize('Corrupted PDF')}[Discarded as Corrupted PDF];
+
+    H -- Pass: {after_relevance} --> I[Build RAPTOR Index];
+    H -- Discard: {relevance_discards} --> F_{sanitize('Not relevant')}[Discarded as Not Relevant];
+
+    I --> J[Analysis];
+
     subgraph Parameters;
-        P1("Query: {query}");
-        P2("Publishers: {', '.join(publishers)}");
-        P3("Target References: {num_refs}");
-        P4("Years: {start_year}-{end_year}");
+        P1("Query: {final_state['query']}");
+        P2("Publishers: {', '.join(final_state['publishers'])}");
+        P3("Years: {final_state['start_year']}-{final_state['end_year']}");
     end;
     """
     return diagram
@@ -463,29 +581,20 @@ def main():
         st.header("1. Research Parameters")
         query = st.text_input("Academic Topic", "indoor air quality monitoring using machine learning")
         
-        # Updated publisher list in the UI
         publishers = st.multiselect(
             "Filter by Publisher (via arXiv metadata)",
-            options=["IEEE", "ACM", "Springer", "Elsevier"],
+            options=DEFAULT_PUBLISHERS,
             default=DEFAULT_PUBLISHERS
         )
-        st.info("This filters arXiv papers that have a journal reference or DOI matching the selected publishers. 'Elsevier' is used as a proxy for papers indexed in Scopus.")
+        st.info("The pipeline will search arXiv and only keep papers matching these publishers.")
 
-        num_references = st.slider("Total Desired References", 1, 100, 10)
-        
-        current_year = datetime.now().year
-        start_year = st.number_input("Start Year", min_value=1991, max_value=current_year, value=2020)
-        end_year = st.number_input("End Year", min_value=1991, max_value=current_year, value=current_year)
-        
-        if start_year > end_year:
-            st.error("Error: Start year cannot be after end year.")
-
+      
         st.header("2. AI Model Configuration")
         
         ollama_models = get_ollama_models()
         if ollama_models:
             default_chat_index = ollama_models.index("llama3:8b") if "llama3:8b" in ollama_models else 0
-            model_name = st.selectbox("Select a Chat Model", ollama_models, index=default_chat_index)
+            model_name = st.selectbox("Select a Chat/Relevance Model", ollama_models, index=default_chat_index)
             
             default_summary_index = ollama_models.index("llama3:8b") if "llama3:8b" in ollama_models else 0
             summary_model_name = st.selectbox("Select a Summary Model", ollama_models, index=default_summary_index)
@@ -494,7 +603,7 @@ def main():
             embeddings_model_name = st.selectbox("Select an Embeddings Model", ollama_models, index=default_embed_index)
         else:
             st.warning("Ollama not detected. Please enter model names manually.")
-            model_name = st.text_input("Ollama Chat Model Name", "llama3")
+            model_name = st.text_input("Ollama Chat/Relevance Model", "llama3")
             summary_model_name = st.text_input("Ollama Summary Model Name", "llama3")
             embeddings_model_name = st.text_input("Ollama Embeddings Model Name", "mxbai-embed-large")
         
@@ -506,7 +615,7 @@ def main():
             }
         
         st.header("3. Start Research")
-        if st.button("Start Research Pipeline") and start_year <= end_year:
+        if st.button("Start Research Pipeline"):
             if not st.session_state.model_config.get("model_name"):
                 st.error("Please configure the AI model before starting.")
             else:
@@ -519,10 +628,7 @@ def main():
                 with st.spinner("Running deep research pipeline..."):
                     initial_state = {
                         "query": query, 
-                        "publishers": publishers, 
-                        "num_references": num_references,
-                        "start_year": start_year,
-                        "end_year": end_year,
+                        "publishers": publishers,  
                         "conversation_history": []
                     }
                     final_state = graph.invoke(initial_state)
@@ -530,7 +636,7 @@ def main():
                         st.session_state.research_done = True
                         st.session_state.final_state = final_state
                     else:
-                        st.error("Research pipeline failed to build an index. Check logs.")
+                        st.error("Research pipeline failed to build an index. Check logs for errors.")
 
     if st.session_state.research_done:
         st.header("Conversational QA")
@@ -573,7 +679,7 @@ def main():
             
             st.session_state.messages.append({"role": "assistant", "content": response_content})
         
-        with st.expander("Export Options"):
+        with st.expander("Export Options & Pipeline Summary"):
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("Export Chat & Used References"):
@@ -585,21 +691,19 @@ def main():
             with col2:
                 if st.button("Export Full Bibliography"):
                     bib_pdf_bytes = generate_bibliography_pdf(
-                        papers_by_publisher=st.session_state.final_state.get('papers_by_publisher', {})
+                        papers_by_publisher=st.session_state.final_state.get('final_kept_papers', {})
                     )
                     st.download_button(label="Download Bibliography PDF", data=bib_pdf_bytes, file_name="full_bibliography.pdf", mime="application/pdf")
 
+            st.subheader("Pipeline Execution Diagram")
             if st.button("Generate Pipeline Diagram"):
                 final_state = st.session_state.final_state
-                mermaid_code = generate_mermaid_diagram(
-                    query=final_state['query'], 
-                    publishers=final_state['publishers'],
-                    num_refs=final_state['num_references'], 
-                    papers_by_publisher=final_state['papers_by_publisher'],
-                    start_year=final_state['start_year'],
-                    end_year=final_state['end_year']
-                )
-                st.code(mermaid_code, language="mermaid")
+                if final_state:
+                    mermaid_code = generate_mermaid_diagram(final_state)
+                    st.code(mermaid_code, language="mermaid")
+                else:
+                    st.warning("Final state not available to generate diagram.")
+
     else:
         st.info("Configure your research and AI model in the sidebar, then click 'Start Research Pipeline'.")
 
