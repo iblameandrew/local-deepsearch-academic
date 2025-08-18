@@ -1,0 +1,29 @@
+# Web Framework
+streamlit
+
+# Core LangChain Libraries
+langchain
+langgraph
+langchain-core
+langchain-community
+
+# LLM and Embedding Integrations
+langchain-google-genai
+ollama
+
+# Vector Store (Facebook AI Similarity Search)
+faiss-cpu
+
+# Web Search
+duckduckgo-search
+requests
+beautifulsoup4
+
+# Document Processing
+pypdf     # For loading and extracting text from PDFs with PyPDFLoader
+fpdf2     # For generating the PDF chat history report
+
+# Data Validation
+pydantic
+# Environment Variable Management
+python-dotenv
