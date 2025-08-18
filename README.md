@@ -41,7 +41,7 @@ cd academic-deep-search
 This project uses a requirements.txt file, so setup is straightforward. Using a virtual environment is highly recommended.
 code
 Bash
-### Create and activate a virtual environment
+### 2. Create and activate a virtual environment
 
 ```bash
 python -m venv venv
@@ -53,32 +53,30 @@ pip install -r requirements.txt
 
 ```
 
-3. Get Ollama Running
+### 3. Get Ollama Running
 
 This app is designed to run entirely on your local machine using Ollama.
 Install Ollama if you haven't already.
 Pull the recommended models. You'll want a capable chat model and a specialized embedding model for the best results.
 
-### A powerful and widely-used model for chat, relevance checking, and report generation
 
 ```bash
 ollama pull qwen3:1.7b
 ```
-
-### A top-tier open-source model specifically for embeddings
 
 ```bash
 ollama pull mxbai-embed-large
 Ensure the Ollama server is running in the background.
 ```
 
-4. Fire It Up! Run the Streamlit app from your terminal:
+### 4. Fire It Up! Run the Streamlit app from your terminal:
 
 ```bash
 streamlit run app.py
 ```
 
 Your browser should open with the app ready to go. Configure your research topic and select your desired Ollama models in the sidebar, then kick off the research pipeline.
+
 ## Use Cases & Who This Is For
 
 I built this with a few people in mind:
