@@ -11,10 +11,11 @@ langchain-community
 langchain-google-genai
 ollama
 scikit-learn
-# Web Search
+faiss-cpu
 requests
-arxiv
 
+# Web Search
+arxiv
 # Document Processing
 pypdf     # For loading and extracting text from PDFs with PyPDFLoader
 fpdf2     # For generating the PDF chat history report
