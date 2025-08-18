@@ -10,7 +10,7 @@ langchain-community
 # LLM and Embedding Integrations
 langchain-google-genai
 ollama
-
+scikit-learn
 # Web Search
 duckduckgo-search
 requests

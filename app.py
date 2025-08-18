@@ -281,7 +281,7 @@ def main():
         st.header("1. Research Parameters")
         query = st.text_input("Academic Topic", "indoor quality monitoring using machine learning")
         domains_str = st.text_area("Webpage Domains (one per line)", "\n".join(DEFAULT_DOMAINS))
-        num_references = st.slider("References per Domain", 1, 10, 2)
+        num_references = st.slider("References per Domain", 1, 500, 2)
 
         st.header("2. AI Model Configuration")
         llm_provider = st.selectbox("LLM Provider", ["Ollama", "Gemini"], key="llm_provider")
