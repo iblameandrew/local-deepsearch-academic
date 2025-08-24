@@ -33,7 +33,7 @@ Ready to build your own personal research assistant? Here’s how to get it runn
 ### 1. Clone the Repo
 
 ```bash
-git clone https://github.com/your-username/academic-deep-search.git
+git clone https://github.com/iblameandrew/academic-deep-search.git
 cd academic-deep-search
 ```
 
