@@ -6,21 +6,19 @@ langchain
 langgraph
 langchain-core
 langchain-community
+langchain-text-splitters
+langchain-ollama
 
 # LLM and Embedding Integrations
-langchain-google-genai
 ollama
+semanticscholar
 scikit-learn
 faiss-cpu
 requests
 
-# Web Search
-arxiv
 # Document Processing
-pypdf     # For loading and extracting text from PDFs with PyPDFLoader
-fpdf2     # For generating the PDF chat history report
+fpdf2
 python-dotenv
+
 # Data Validation
 pydantic
-# Environment Variable Management
-python-dotenv
